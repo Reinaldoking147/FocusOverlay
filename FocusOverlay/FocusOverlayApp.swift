@@ -306,11 +306,10 @@ class OverlayState: ObservableObject {
     private var deepConfig: ModeSettings
 
     let currentVersion = "1.01"
-    let githubReleasesAPI = ["https:", "", "://github.com", "repos", "Reinaldoking147", "FocusOverlay", "releases", "latest"].joined(separator: "/")
+    let githubReleasesAPI = ["https:", "", "://github.com", "repos", "Reinaldoking147", "TotalFocus", "releases", "latest"].joined(separator: "/")
 
     init() {
         self.isEnabled = UserDefaults.standard.object(forKey: "isEnabled") as? Bool ?? true
-
 
         if let data = UserDefaults.standard.data(forKey: "ambientConfig"),
         let decoded = try? JSONDecoder().decode(ModeSettings.self, from: data) {
@@ -428,7 +427,8 @@ class OverlayState: ObservableObject {
         }
         var request = URLRequest(url: url)
         request.timeoutInterval = 6.0
-        request.setValue("FocusOverlay-macOS", forHTTPHeaderField: "User-Agent")
+            request.setValue("TotalFocus-macOS", forHTTPHeaderField: "User-Agent")
+
         URLSession.shared.dataTask(with: request) { [weak self] data, _, _ in
         DispatchQueue.main.async {
         guard let self = self else { return }
@@ -709,8 +709,10 @@ class OverlayState: ObservableObject {
         var hotKeyRef: EventHotKeyRef?
         var eventHandlerInstalled = false
         var lastOrderedWindowNumber: Int = -1
-        var localEventMonitor: Any?
+        private var candidateWindowNumber: Int = -1
+        private var candidateStableFrames: Int = 0
         var shortcutRecorderMonitor: Any?
+        private var shakePollTimer: Timer?
         private var lastMouseX: CGFloat = 0
         private var lastDirection: Int = 0
         private var accumulatedStroke: CGFloat = 0
@@ -719,10 +721,11 @@ class OverlayState: ObservableObject {
         func applicationDidFinishLaunching(_ notification: Notification) {
         let currentPID = ProcessInfo.processInfo.processIdentifier
         for app in NSWorkspace.shared.runningApplications {
-        if app.processIdentifier != currentPID &&
-        (app.localizedName == "FocusOverlay" || app.bundleIdentifier == Bundle.main.bundleIdentifier) {
-        app.forceTerminate()
-        }
+            if app.processIdentifier != currentPID &&
+               (app.localizedName == "TotalFocus" || app.localizedName == "FocusOverlay" || app.bundleIdentifier == Bundle.main.bundleIdentifier) {
+                app.forceTerminate()
+            }
+
         }
         state.onUpdate = { [weak self] isPowerToggle, isModeTransition in
         self?.refreshOverlays(isPowerToggle: isPowerToggle, isModeTransition: isModeTransition)
@@ -835,12 +838,9 @@ class OverlayState: ObservableObject {
         }
         }
         func setupMouseShakeDetector() {
-        NSEvent.addGlobalMonitorForEvents(matching: [.mouseMoved]) { [weak self] _ in
+        shakePollTimer?.invalidate()
+        shakePollTimer = Timer.scheduledTimer(withTimeInterval: 0.04, repeats: true) { [weak self] _ in
         self?.processMouseMovement()
-        }
-        localEventMonitor = NSEvent.addLocalMonitorForEvents(matching: [.mouseMoved]) { [weak self] event in
-        self?.processMouseMovement()
-        return event
         }
         }
         private func processMouseMovement() {
@@ -876,6 +876,8 @@ class OverlayState: ObservableObject {
         }
         @objc func screensChanged() {
         lastOrderedWindowNumber = -1
+        candidateWindowNumber = -1
+        candidateStableFrames = 0
         setupOverlays()
         }
         @objc func activeAppChanged() {
@@ -899,7 +901,7 @@ class OverlayState: ObservableObject {
         }
         }
         func startTrackingActiveWindow() {
-        timer = Timer.scheduledTimer(withTimeInterval: 0.025, repeats: true) { [weak self] _ in
+        timer = Timer.scheduledTimer(withTimeInterval: 0.03, repeats: true) { [weak self] _ in
         self?.updateOverlayOrderAndWindowFrame()
         }
         }
@@ -920,7 +922,7 @@ class OverlayState: ObservableObject {
         let boundsDict = windowInfo[kCGWindowBounds as String] as? [String: CGFloat] {
         let width = boundsDict["Width"] ?? 0
         let height = boundsDict["Height"] ?? 0
-        if width >= 160 && height >= 160 {
+        if width >= 260 && height >= 260 {
         let rect = CGRect(x: boundsDict["X"] ?? 0, y: boundsDict["Y"] ?? 0, width: width, height: height)
         return (windowNumber, rect)
         }
@@ -938,7 +940,7 @@ class OverlayState: ObservableObject {
         let boundsDict = windowInfo[kCGWindowBounds as String] as? [String: CGFloat] {
         let width = boundsDict["Width"] ?? 0
         let height = boundsDict["Height"] ?? 0
-        if width >= 160 && height >= 160 {
+        if width >= 260 && height >= 260 {
         let rect = CGRect(x: boundsDict["X"] ?? 0, y: boundsDict["Y"] ?? 0, width: width, height: height)
         return (windowNumber, rect)
         }
@@ -949,6 +951,8 @@ class OverlayState: ObservableObject {
         private func positionOverlaysBelowActiveWindow() {
         guard let target = findTopmostTargetWindow() else { return }
         lastOrderedWindowNumber = target.windowNumber
+        candidateWindowNumber = target.windowNumber
+        candidateStableFrames = 0
         for overlay in overlayWindows {
         overlay.snapBelowWindow(windowNumber: target.windowNumber, cgRect: target.cgRect, state: state)
         }
@@ -957,13 +961,23 @@ class OverlayState: ObservableObject {
         guard state.isEnabled else { return }
         guard let target = findTopmostTargetWindow() else { return }
         if target.windowNumber != lastOrderedWindowNumber {
+        if target.windowNumber == candidateWindowNumber {
+        candidateStableFrames += 1
+        } else {
+        candidateWindowNumber = target.windowNumber
+        candidateStableFrames = 1
+        }
+        guard candidateStableFrames >= 1 else { return }
         let isFirstOrder = (lastOrderedWindowNumber == -1)
         lastOrderedWindowNumber = target.windowNumber
+        candidateStableFrames = 0
         let duration = isFirstOrder ? 0.0 : (state.transitionMs / 1000.0)
         for overlay in overlayWindows {
         overlay.transitionToWindow(windowNumber: target.windowNumber, cgRect: target.cgRect, state: state, duration: duration)
         }
         } else {
+        candidateWindowNumber = target.windowNumber
+        candidateStableFrames = 0
         for overlay in overlayWindows {
         overlay.updateActiveWindowBounds(target.cgRect, state: state)
         }
@@ -977,8 +991,8 @@ class OverlayState: ObservableObject {
         if !eventHandlerInstalled {
         var eventType = EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed))
         let handler: EventHandlerUPP = { _, _, userData -> OSStatus in
-        if let userData = userData {
-        let appDelegate = Unmanaged<AppDelegate>.fromOpaque(userData).takeUnretainedValue()
+        if let userData = userData,
+           let appDelegate = Unmanaged<AnyObject>.fromOpaque(userData).takeUnretainedValue() as? AppDelegate {
         DispatchQueue.main.async {
         if !appDelegate.state.isRecordingShortcut {
         appDelegate.state.isEnabled.toggle()
@@ -1047,7 +1061,7 @@ class OverlayState: ObservableObject {
         HStack(spacing: 8) {
         MonitorIconView(state: state)
         .frame(width: 22, height: 18)
-        Text("FocusOverlay")
+        Text("TotalFocus")
         .font(.headline)
         Spacer()
         Toggle("", isOn: $state.isEnabled)
@@ -1351,6 +1365,7 @@ class OverlayState: ObservableObject {
         private var dimLayer: CALayer!
         private var dimMaskLayer: CAGradientLayer!
         private let targetScreen: NSScreen
+        private var crossfadeWindow: NSWindow?
         private var smoothedWindowRect: CGRect = .zero
         private var targetWindowRect: CGRect = .zero
         private var currentBlurRadius: Double = 62.13
@@ -1362,7 +1377,7 @@ class OverlayState: ObservableObject {
         init(screen: NSScreen) {
         self.targetScreen = screen
         super.init(
-        contentRect: screen.frame,
+        contentRect: screen.frame.insetBy(dx: -120, dy: -120),
         styleMask: [.borderless],
         backing: .buffered,
         defer: false
@@ -1371,9 +1386,13 @@ class OverlayState: ObservableObject {
         self.backgroundColor = NSColor.white.withAlphaComponent(0.001)
         self.ignoresMouseEvents = true
         self.hasShadow = false
+        self.disableCursorRects()
         self.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
         setupBackdropLayers()
         }
+        override var canBecomeKey: Bool { false }
+        override var canBecomeMain: Bool { false }
+        override func resetCursorRects() {}
         private func makeConfiguredGradientLayer(bounds: CGRect) -> CAGradientLayer {
         let layer = CAGradientLayer()
         layer.frame = bounds
@@ -1385,7 +1404,9 @@ class OverlayState: ObservableObject {
         "endPoint": NSNull(),
         "type": NSNull(),
         "bounds": NSNull(),
-        "position": NSNull()
+        "position": NSNull(),
+        "opacity": NSNull(),
+        "mask": NSNull()
         ]
         return layer
         }
@@ -1576,28 +1597,68 @@ class OverlayState: ObservableObject {
         }
         }
         }
-        func transitionToWindow(windowNumber: Int, cgRect: CGRect, state: OverlayState, duration: TimeInterval) {
-        let primaryHeight = NSScreen.screens.first?.frame.height ?? targetScreen.frame.height
-        let cocoaY = primaryHeight - cgRect.origin.y - cgRect.height
-        let cocoaRect = CGRect(x: cgRect.origin.x, y: cocoaY, width: cgRect.width, height: cgRect.height)
-        self.order(.below, relativeTo: windowNumber)
-        self.targetWindowRect = cocoaRect
-        if self.smoothedWindowRect == .zero {
-        self.smoothedWindowRect = cocoaRect
-        }
-        CATransaction.begin()
-        CATransaction.setDisableActions(true)
-        updateGradientMask(state: state, gradientOverride: currentGradientAmount)
-        CATransaction.commit()
-        if duration > 0.05 && state.isEnabled {
-        self.alphaValue = 0.0
-        NSAnimationContext.runAnimationGroup({ context in
-        context.duration = duration
-        context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
-        self.animator().alphaValue = 1.0
-        })
-        }
-        }
+            private var crossfadeOverlay: BackdropOverlayWindow?
+
+            func transitionToWindow(windowNumber: Int, cgRect: CGRect, state: OverlayState, duration: TimeInterval) {
+                let primaryHeight = NSScreen.screens.first?.frame.height ?? targetScreen.frame.height
+                let cocoaY = primaryHeight - cgRect.origin.y - cgRect.height
+                let cocoaRect = CGRect(x: cgRect.origin.x, y: cocoaY, width: cgRect.width, height: cgRect.height)
+
+                let previousRect = self.smoothedWindowRect
+                self.targetWindowRect = cocoaRect
+                if self.smoothedWindowRect == .zero {
+                    self.smoothedWindowRect = cocoaRect
+                }
+
+                if duration > 0.04 && state.isEnabled && self.isVisible && self.alphaValue > 0.5 && previousRect != .zero {
+                    crossfadeOverlay?.orderOut(nil)
+                    let ghost = BackdropOverlayWindow(screen: targetScreen)
+                    ghost.smoothedWindowRect = previousRect
+                    ghost.targetWindowRect = previousRect
+                    ghost.renderImmediateValues(
+                        blur: currentBlurRadius,
+                        grain: currentGrainAmount,
+                        gradient: currentGradientAmount,
+                        dim: currentDimAmount,
+                        color: currentDimColor,
+                        state: state
+                    )
+                    ghost.alphaValue = 1.0
+                    ghost.order(.below, relativeTo: self.windowNumber)
+                    self.crossfadeOverlay = ghost
+
+                    CATransaction.begin()
+                    CATransaction.setDisableActions(true)
+                    self.order(.below, relativeTo: windowNumber)
+                    updateGradientMask(state: state, gradientOverride: currentGradientAmount)
+                    self.alphaValue = 0.0
+                    CATransaction.commit()
+
+                    NSAnimationContext.runAnimationGroup({ context in
+                        context.duration = duration
+                        context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+                        self.animator().alphaValue = 1.0
+                        ghost.animator().alphaValue = 0.0
+                    }, completionHandler: {
+                        ghost.orderOut(nil)
+                        if self.crossfadeOverlay === ghost {
+                            self.crossfadeOverlay = nil
+                        }
+                    })
+                    return
+                }
+
+                CATransaction.begin()
+                CATransaction.setDisableActions(true)
+                self.order(.below, relativeTo: windowNumber)
+                updateGradientMask(state: state, gradientOverride: currentGradientAmount)
+                CATransaction.commit()
+
+                if state.isEnabled {
+                    self.alphaValue = 1.0
+                }
+            }
+
         func updateActiveWindowBounds(_ cgRect: CGRect, state: OverlayState) {
         let primaryHeight = NSScreen.screens.first?.frame.height ?? targetScreen.frame.height
         let cocoaY = primaryHeight - cgRect.origin.y - cgRect.height
@@ -1665,11 +1726,13 @@ class OverlayState: ObservableObject {
         let cOuter = NSColor.black.withAlphaComponent(outerAlpha).cgColor
         layer.colors = [cInner, cInner, cMidLow, cMidHigh, cOuter, cOuter]
         let activeRect = (smoothedWindowRect == .zero) ? targetScreen.frame.insetBy(dx: 200, dy: 150) : smoothedWindowRect
-        let normX = (activeRect.midX - targetScreen.frame.origin.x) / targetScreen.frame.width
-        let normY = (activeRect.midY - targetScreen.frame.origin.y) / targetScreen.frame.height
+        let rawNormX = (activeRect.midX - self.frame.origin.x) / self.frame.width
+        let rawNormY = (activeRect.midY - self.frame.origin.y) / self.frame.height
+        let normX = min(1.0, max(0.0, rawNormX))
+        let normY = min(1.0, max(0.0, rawNormY))
         let auraScale = 0.72 + (0.42 * g)
-        let radiusX = max(0.20, (activeRect.width / targetScreen.frame.width) * auraScale)
-        let radiusY = max(0.20, (activeRect.height / targetScreen.frame.height) * auraScale)
+        let radiusX = max(0.20, (activeRect.width / self.frame.width) * auraScale)
+        let radiusY = max(0.20, (activeRect.height / self.frame.height) * auraScale)
         layer.startPoint = CGPoint(x: normX, y: normY)
         layer.endPoint = CGPoint(x: normX + radiusX, y: normY + radiusY)
         layer.locations = [0.0, 0.48, 0.68, 0.85, 0.97, 1.0]
@@ -1680,3 +1743,4 @@ class OverlayState: ObservableObject {
         syncNativeGradient(dimMaskLayer, state: state, gradientValue: gradientOverride)
         }
         }
+
